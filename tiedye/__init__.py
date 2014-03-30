@@ -52,6 +52,11 @@ class Injector(object):
 
     def __init__(self, app, providers):
         self.app = app
+        # We take a shallow copy of the given providers map since
+        # we assume the map will never be mutated but if we use the
+        # caller's dictionary they may mutate it for their own
+        # reasons, without considering the effect on existing injectors.
+        providers = dict(providers)
         self.providers = providers
         self.currently_binding = set()
         self.bound_funcs = weakref.WeakKeyDictionary()
