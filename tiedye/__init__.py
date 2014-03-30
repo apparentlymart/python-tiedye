@@ -29,39 +29,82 @@ class Application(object):
                 )
             )
 
-    def make_injector(self, providers):
-        return Injector(self, providers)
+    def make_injector(self, *provider_sets, **kwargs):
+        """
+        Create an :py:class:`Injector` instance for the current app.
+
+        Once an application has dependency lists for a number of callables,
+        an injector from that application can be used to automatically provide
+        the dependency objects.
+
+        When instantiating an injector, the calling application passes in one
+        or more instances of :py:class:`ProviderSet` subclasses whose
+        providers will be registered on the injector.
+
+        A caller may optionally pass in a special named argument called
+        ``local_providers`` which is a mapping from interface identifiers
+        to provider functions. This is an alternative to wrapping a set
+        of providers in a :py:class:`ProviderSet` when e.g. the application
+        wants to provide a small set of extra local variables.
+
+        A provider function is any callable that takes an interface instance
+        returns an implementation of the given interface. If the provider
+        function has registered dependencies then these will be bound before
+        the provider function is called.
+
+        """
+        return Injector(
+            self,
+            provider_sets,
+            kwargs.get("local_providers"),
+        )
 
 
 class Injector(object):
     """
     Implements a mapping from interfaces to object providers.
 
-    Once an application has dependency lists for a number of callables,
-    an injector from that application can be used to automatically provide
-    the dependency objects.
-
-    When instantiating an injector, the calling application passes in
-    a mapping object whose keys are either interface instances or interface
-    types and whose values are provider functions.
-
-    A provider function is any callable that takes an interface instance and
-    an injector as positional arguments and returns an implementation of the
-    given interface.
+    Instead of instantiating ``Injector`` directly, prefer to use
+    :py:meth:`Application.make_injector`.
     """
 
-    def __init__(self, app, providers):
+    def __init__(self, app, provider_sets, local_providers=None):
         self.app = app
-        # We take a shallow copy of the given providers map since
-        # we assume the map will never be mutated but if we use the
-        # caller's dictionary they may mutate it for their own
-        # reasons, without considering the effect on existing injectors.
-        providers = dict(providers)
+        providers = {}
+
+        # Build up a providers map from the provider sets, implicitly
+        # declaring the provider dependencies on the app for later binding.
+        # Doing this late allows us to avoid tethering a provider set to
+        # any particular app, thus allowing many apps to share a provider set
+        # in an external shared library.
+        for provider_set in provider_sets:
+            for provider_impl in provider_set.providers:
+                # Register the dependencies on our app.
+                self.app.dependencies(
+                    provider_impl,
+                    **provider_impl.provider_dependencies
+                )
+                # provider_impl is a raw function that isn't yet bound
+                # to an instance, so we need to bind it to get the
+                # actual provider.
+                inst_provider_impl = types.MethodType(
+                    provider_impl,
+                    provider_set,
+                )
+                for interface in provider_impl.provider_interfaces:
+                    providers[interface] = (
+                        inst_provider_impl
+                    )
+
+        if local_providers is not None:
+            providers.update(local_providers)
+
+        # Expose the injector itself as an injectable object
+        providers[Injector] = lambda dummy: self
+
         self.providers = providers
         self.currently_binding = set()
         self.bound_funcs = weakref.WeakKeyDictionary()
-        # Expose the injector itself as an injectable object
-        providers[Injector] = lambda dummy: self
 
     def bind(self, func):
         """
@@ -143,11 +186,12 @@ class Injector(object):
         self.bound_funcs[func] = injected
         return injected
 
-    def specialize(self, more_providers):
+    def specialize(self, *provider_sets, **kwargs):
         """
         Create a new injector initialized with the same provider
         configuration as this one, and for the same application,
-        but with some additional providers.
+        but with some additional providers. Takes the same arguments
+        as :py:meth:`Application.make_injector`.
 
         The primary use for this is to create an application-wide injector
         on startup, containing items that should live for the lifetime of the
@@ -160,9 +204,18 @@ class Injector(object):
         provision as possible, but defer a few request-specific dependencies
         until the request is being handled.
         """
+        # By the time we're in here the original provider sets we were
+        # passed have already be flattened into our providers dict,
+        # so we don't need to worry about flattening them again.
         new_providers = dict(self.providers)
-        new_providers.update(more_providers)
-        return Injector(self.app, new_providers)
+        local_providers = kwargs.get("local_providers")
+        if local_providers is not None:
+            new_providers.update(local_providers)
+        return Injector(
+            self.app,
+            provider_sets,
+            new_providers,
+        )
 
 
 def make_interface(name=None):
@@ -204,6 +257,48 @@ def make_interface_enum(*names):
         if_inst.name = name
         setattr(if_type, name, if_inst)
     return if_type
+
+
+class ProviderSetMeta(type):
+
+    def __new__(self, name, bases, dict):
+        providers = set()
+
+        # "inherit" all of the providers from the base type
+        for base_type in bases:
+            base_type_providers = getattr(base_type, "providers", None)
+            if base_type_providers is not None:
+                providers.update(base_type_providers)
+
+        # Now add all of the providers on *this* type
+        for member in dict.itervalues():
+            if callable(member):
+                # If this attribute is present then we know the method
+                # was decorated with @ProviderSet.provide.
+                if hasattr(member, "provider_interfaces"):
+                    providers.add(member)
+
+        dict["providers"] = providers
+
+        return type.__new__(self, name, bases, dict)
+
+
+class ProviderSet(object):
+    __metaclass__ = ProviderSetMeta
+
+    def __init__(self):
+        if type(self) is ProviderSet:
+            raise Exception(
+                "Don't instantiate ProviderSet directly. Subclass it instead."
+            )
+
+    @staticmethod
+    def provide(*interfaces, **dependencies):
+        def annotate(func):
+            func.provider_interfaces = set(interfaces)
+            func.provider_dependencies = dependencies
+            return func
+        return annotate
 
 
 class DependencyCycleError(Exception):
