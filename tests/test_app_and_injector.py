@@ -146,7 +146,7 @@ class TestAppAndInjector(unittest.TestCase):
         # well enough for this test, and shows that we aren't doing anything
         # that *prevents* using a tuple as an interface, if a caller wants to
         # do something unusual.
-        interface2 = ("hi","world")
+        interface2 = ("hi", "world")
         interface_type = type(interface2)
 
         # the provider itself gets bound, so it can declare dependencies
