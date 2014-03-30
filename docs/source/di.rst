@@ -50,7 +50,7 @@ probably be separate Python modules.)
        def __init__(self):
            self.template_cache = {}
 
-       def render(data, template_name):
+       def render(self, data, template_name):
            if template_name in self.template_cache:
                compiled = self.template_cache[template_name]
            else:
@@ -167,7 +167,7 @@ uses of caching with memcache:
 
    class TemplateRenderer(object):
 
-       def render(data, template_name):
+       def render(self, data, template_name):
            cache = get_cache()
            if cache.has("template", template_name):
                compiled = cache.get("template", template_name)
@@ -383,7 +383,7 @@ the caching system, the template compiler and the template directory:
            self.cache = cache
            self.compile_template = compile_template
 
-       def render(data, template_name):
+       def render(self, data, template_name):
            if self.cache.has("template", template_name):
                compiled = self.cache.get("template", template_name)
            else:
@@ -507,4 +507,300 @@ further changes the real application is broken: the global variable
 ``renderer`` can no longer be initialized since it does not provide the
 two new required parameters. We'll fix this in the next section.
 
+Wiring Up Dependencies
+----------------------
 
+One problem with retrofitting the dependency injection pattern into an
+existing application is that it's difficult to do for a particular system
+in isolation: changing the signature for one subsystem requires changes to
+all of its callers, which often in turn requires *them* to implement
+the pattern also.
+
+In our example, we made ``TemplateRenderer`` accept its dependencies as
+initializer arguments, but our existing caller doesn't yet know how to
+provide these:
+
+.. code-block:: python
+
+   ### Entry Points
+
+   renderer = TemplateRenderer()
+
+   # This is an entry point for this snippet of code.
+   # This would be called from elsewhere in the application.
+   def render_article(article_id):
+       article = load_article(article_id)
+       data = {
+           "article": article,
+       }
+       return renderer.render(data, template_name="article")
+
+In our current state this module will fail to load, since there aren't
+enough arguments in our call to the ``TemplateRenderer`` type. The naive fix
+for this is to simply reproduce all of the code we stripped out of
+``TemplateRenderer`` inside this entry points section:
+
+.. code-block:: python
+
+   ### Entry points
+
+   import ubertemplates
+   import os.path
+
+   def compile_template(template_name):
+       return ubertemplates.compile_template_to_python(
+           os.path.join(template_dir, template_name + '.tmpl')
+       )
+
+   cache = get_cache()
+
+   renderer = TemplateRenderer(
+       cache=cache,
+       compile_template=compile_template,
+   )
+
+This makes the application work again, and could be a pretty good final state
+for a simple application since we've achieved the goal of isolating the
+template renderer from its dependencies by "wiring up" the dependencies
+in one central location. There will always be *some* part of the application
+where all of the subsystems are instantiated and configured, and we could
+decide that this is the right place for our example application.
+
+However, this still doesn't feel quite right since our article-rendering
+function is still tightly coupled to its template renderer, so we're still
+mixing application logic with instantiation. To fix this we need to make
+article rendering *also* use dependency injection. One simple way to do this
+is to just add a new parameter to the function:
+
+.. code-block:: python
+
+   def render_article(article_id, renderer):
+       article = load_article(article_id)
+       data = {
+           "article": article,
+       }
+       return renderer.render(data, template_name="article")
+
+Now each time ``render_article`` is called the caller must pass in the
+renderer object to use. However, this is pretty inconvenient since it forces
+all callers to obtain an appropriate renderer. Therefore it's more common
+to recast this interface as an instance method, so we can separate the
+dependency injection from the call:
+
+.. code-block:: python
+
+   class ArticleRenderer(object):
+
+       def __init__(self, template_renderer):
+           self.template_renderer = template_renderer
+
+       def render_article(self, article_id):
+           article = load_article(article_id)
+           data = {
+               "article": article,
+           }
+           return self.template_renderer.render(data, template_name="article")
+
+Now of course the caller of ``render_article`` must be changed too, and this
+process can in theory require changes to multiple callers at once. Eventually
+there must be some code that *does* instantiate objects and wire them up,
+and this is hopefully separated from everything else in the application's
+startup and initialization code. Here's what this would look like with what
+we've done so far.
+
+.. code-block:: python
+
+    # Global cache implementation
+    cache = get_cache()
+
+    template_dir = 'templates'
+    # This new UberTemplatesCompiler wrapper class allows us to inject the
+    # template directory. Implementation of this class is left as an exercise.
+    template_compiler = UberTemplatesCompiler(
+        template_dir,
+    )
+
+    template_renderer = TemplateRenderer(
+        cache=cache,
+        # Pass in a bound method from our UberTemplatesCompiler instance
+        compile_template=template_compiler.compile_template,
+    )
+
+    article_renderer = ArticleRenderer(
+        template_renderer=template_renderer,
+    )
+
+    def render_article(article_id):
+        return article_renderer.render_article(article_id)
+
+The initialization code then becomes a long list of object instantiations,
+some passing objects instantiated earlier, which "wires up" the subsystems
+to one another such that they work as one cohesive whole without any
+subsystem knowing anything more than what interface it expects.
+
+.. note:: Of course our ``render_article`` is still coupled to our
+    ``load_article`` function in this example, and in turn that function
+    is coupled to the underlying data store; these could too be injected if
+    desired, but for simplicity's sake we'll leave these as an exercise for
+    the reader.
+
+Beyond Manual Wiring
+--------------------
+
+At this point we've successfully implemented the dependency injection pattern
+in pure Python with no special extra libraries. Each of our subsystems is
+self-contained and testable in isolation. The one remaining wart is the
+huge block of initialization code that wires everything together.
+
+Doing all of the wiring in one spot is definitely an *improvement* over our
+original program, since it allows the application to be wired up in different
+ways for different situations, such as testing, or to create a simpler
+development environment, etc.
+
+However, the wiring code must be careful to instantiate objects in the correct
+order and inject the right dependencies into the right places; if a subsystem
+grows a new dependency later, it will probably require the initialization code
+to be reordered, and it's problematic to have a single section of code that
+tends to change in response to every other system change, since this encourages
+version control conflicts and thus hampers parallel development.
+
+Until this point we've done pretty well with only the application of a
+design pattern that works within standard Python functionality. Howver, this
+dependency-wiring problem is difficult to solve in Python alone, and *this*
+is where ``tiedye`` becomes useful: it provides a simple mechanism to
+declare subsystem dependencies and then a utility to automatically wire
+subsystems together based on those declarations. In order to do this we
+introduce a few new concepts:
+
+* **Interface**: previously in this tutorial we've used "interface" in the
+  abstract sense of "a set of operations an object promises to provide".
+  ``tiedye`` introduces the concept of *interface objects*, which allow
+  interfaces to be explicitly named in code. (However, note that unlike in
+  other languages like Java a ``tiedye`` interface doesn't necessarily
+  *describe* nor *enforce* the interface contract; there are plenty of
+  solutions for that in Python already, such as :py:mod:`abc`, and these
+  can be used in conjunction with ``tiedye`` if desired.)
+
+* **Dependency**: again until now we've been using "dependency" in the abstract,
+  but in ``tiedye`` a dependency is defined as a particular interface that
+  a particular class or function requires.
+
+* **Application**: A ``tiedye`` "application" is really just a repository for
+  dependency information, consisting of a mapping from classes (or functions)
+  to their dependency sets.
+
+* **Provider**: A provider is a function that takes an *interface* and returns
+  an implementation of that interface that can be injected to resolve
+  a dependency.
+
+* **Injector**: An injector holds a mapping from interfaces to providers and
+  uses this information to resolve dependencies.
+
+That's a big bunch of new concepts to understand, but don't worry about them
+too much for the moment as we'll explore each of them by example as we fit
+them into our example application.
+
+The first step is actually, if we're honest, a bit of a step back: we'll
+create a global *application* object and some interface objects that each of
+our subsystems will depend on. This does of course couple the subsystems to
+their containing codebase, but in return for this one deviation from the
+pattern we gain the ability to decentralize dependency declarations, as we'll
+see later.
+
+.. code-block:: python
+
+   import tiedye
+   app = tiedye.Application()
+
+   Cache = tiedye.make_interface("Cache")
+   CompileTemplate = tiedye.make_interface("CompileTemplate")
+   TemplateDir = tiedye.make_interface("TemplateDir")
+   Settings = tiedye.make_interface_enum(
+       "MEMCACHE_SERVERS",
+       "SIDER_SERVERS",
+   )
+
+Here we've created an application and a few interfaces. Any existing class
+can actually be an interface if desired, but here we've used ``make_interface``
+to create identifiers for some interfaces that aren't represented by
+any abstract class in particular, and ``make_interface_enum`` to create
+a set of related interfaces at once. We'll see examples of all of these
+techniques below.
+
+Via a method on the ``app`` object we can now register class dependencies
+using a decorator. Let's use ``TemplateRenderer`` as our first example:
+
+.. code-block:: python
+
+   @app.dependencies(cache=Cache, compile_template=CompileTemplate)
+   class TemplateRenderer(object):
+
+       def __init__(self, cache, compile_template):
+           self.cache = cache
+           self.compile_template = compile_template
+
+       def render(self, data, template_name):
+           # ...just as before
+
+Before describing what we've just done it's more interesting to note what's
+stayed the same: this is still just a plain old Python class that can be
+instantiated as normal... existing code that works with this class can
+operate completely unchanged.
+
+All we've actually done here is registered a set of dependencies for this
+class inside the ``app`` object. That dependency injection can be understood
+as "pass a ``Cache`` implementation into the ``cache`` argument, and a
+``CompileTemplate`` implementation into the ``compile_template`` argument".
+In other words, we're just telling ``tiedye`` what kind of object is
+expected for each of the initializer's arguments.
+
+Let's also do similarly for ``ArticleRenderer`` and ``UberTemplatesCompiler``:
+
+.. code-block:: python
+
+   # Here we're using the existing TemplateRenderer class as an interface
+   # identifier, since it's the canonical implementation of this interface.
+   # This doesn't prevent us from using instances of other classes as
+   # implementations, however.
+   @app.dependencies(template_renderer=TemplateRenderer)
+   class ArticleRenderer(object):
+
+       def __init__(self, template_renderer):
+           self.template_renderer = template_renderer
+
+       def render_article(self, article_id):
+           # ...just as before
+
+   @app.dependencies(template_dir=TemplateDir)
+   class UberTemplatesCompiler(object):
+
+       def __init__(self, template_dir):
+           self.template_dir = template_dir
+
+       def compile_template(self, template_name):
+           # ...just as before
+
+With all of our dependencies declared we can now use an injector to wire
+all of this up, by passing a provider function for each interface:
+
+.. code-block:: python
+
+   @app.dependencies(servers=Settings.MEMCACHE_SERVERS)
+   def memcache_provider(interface, servers):
+       # assuming we changed the MemcacheCache class to take the
+       # servers as a paramter, rather than accessing settings directly.
+       return MemcacheCache(servers)
+
+   def settings_provider(interface):
+       from uberframework.conf import settings
+       return getattr(settings, interface.name)
+
+   injector = app.make_injector({
+       Cache: memcache_provider,
+
+       # This provider applies to *all* interfaces inside the Settings
+       # enum, since the implementation is the same for all of them.
+       Settings: settings_provider,
+
+       # etc, etc
+   })
