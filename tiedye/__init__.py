@@ -151,5 +151,46 @@ class Injector(object):
         return Injector(self.app, new_providers)
 
 
+def make_interface(name=None):
+    """
+    Create a single interface instance.
+
+    The returned interface instance is guaranteed not to share a type with
+    any other interface, so this method is good for one-off interfaces.
+    If you have a set of interfaces that are all variants of the same
+    type then consider using :py:func:`make_interface_enum` instead, so to
+    enable the registration of a single provider function that works for
+    all instances of the enumeration.
+    """
+    if_type = type(name, (object,), {})
+    return if_type()
+
+
+def make_interface_enum(*names):
+    """
+    Create an interface enumeration type.
+
+    A common case is to have a set of related interfaces that all belong
+    to a common container type. Since interfaces have no behavior of their
+    own, all that's required is to have a distinct instance for each
+    interface.
+
+    This function provides a simple way to create a set of singleton interface
+    instances that all share a common type. Just pass in the set of valid
+    interface names and this function will return a type object whose
+    attributes are instances of the type named after the provided names,
+    with a separate instance for each given name.
+    """
+    type_name = "interface_enum(%s)" % (", ".join(names))
+    if_type = type(type_name, (object,), {
+        "__repr__": lambda self: "<%s.%s>" % (type_name, self.name),
+    })
+    for name in names:
+        if_inst = if_type()
+        if_inst.name = name
+        setattr(if_type, name, if_inst)
+    return if_type
+
+
 class DependencyCycleError(Exception):
     pass
