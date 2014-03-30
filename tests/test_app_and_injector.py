@@ -177,6 +177,13 @@ class TestAppAndInjector(unittest.TestCase):
             ("interface1", "type hi"),
         )
 
+        # If we call again with the same function we should get back
+        # the same 'partial' object.
+        bound_func2 = injector.bind(func)
+        self.assertTrue(
+            bound_func2 is bound_func,
+        )
+
     def test_injector_partial_bind(self):
         app = Application()
         interface1 = MagicMock(name="interface1")
@@ -205,4 +212,48 @@ class TestAppAndInjector(unittest.TestCase):
         self.assertEqual(
             bound_func(),
             ("hi", "cheese"),
+        )
+
+    def test_injector_method_bind(self):
+        app = Application()
+        interface1 = MagicMock(name="interface1")
+
+        class Foo(object):
+
+            def __init__(self, name):
+                self.name = name
+
+            @app.dependencies(a=interface1)
+            def bar(self, a):
+                return (self.name, a)
+
+        foo1 = Foo("foo1")
+        foo2 = Foo("foo2")
+
+        injector = app.make_injector({
+            interface1: lambda iface: "interface1"
+        })
+
+        foo1_bar = injector.bind(foo1.bar)
+        foo2_bar = injector.bind(foo2.bar)
+
+        self.assertEqual(
+            foo1_bar(),
+            ("foo1", "interface1"),
+        )
+        self.assertEqual(
+            foo2_bar(),
+            ("foo2", "interface1"),
+        )
+
+        # If we bind foo1.bar again we should get back the same
+        # 'partial' object, even though it's distinct from the one we
+        # got from foo2.bar
+        foo1_bar2 = injector.bind(foo1.bar)
+        self.assertTrue(
+            foo1_bar2 is foo1_bar,
+        )
+        foo1_bar2 = injector.bind(foo1.bar)
+        self.assertTrue(
+            foo1_bar2 is not foo2_bar,
         )

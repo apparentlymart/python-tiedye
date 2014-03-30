@@ -54,6 +54,7 @@ class Injector(object):
         self.app = app
         self.providers = providers
         self.currently_binding = set()
+        self.bound_funcs = weakref.WeakKeyDictionary()
         # Expose the injector itself as an injectable object
         providers[Injector] = lambda dummy: self
 
@@ -73,6 +74,13 @@ class Injector(object):
         to the returned callable or bound separately by a later call to
         :py:meth:`Injector.bind`; this is known as *partial binding*.
         """
+
+        # This is deliberately using 'func' rather than the 'lookup_func'
+        # from below because when we're binding to an instance method we need
+        # to create a distinct binding for each instance, not just one binding
+        # for the method's function.
+        if func in self.bound_funcs:
+            return self.bound_funcs[func]
 
         # If we've been given a bound method then we need to peel off
         # the binding wrapper to find the item in our dependencies table,
@@ -127,6 +135,7 @@ class Injector(object):
                 injected,
                 **unprovided
             )
+        self.bound_funcs[func] = injected
         return injected
 
     def specialize(self, more_providers):
