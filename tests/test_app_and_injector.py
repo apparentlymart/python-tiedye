@@ -67,20 +67,32 @@ class TestAppAndInjector(unittest.TestCase):
         interface2 = MagicMock(name="interface2")
         interface3 = MagicMock(name="interface3")
 
-        def provider1(interface, injector):
+        # This one will masquerade as a method on a ProviderSet instance.
+        def provider1(self, interface, a):
             pass
+
+        provider1.provider_interfaces = set([interface1, interface2])
+        provider1.provider_dependencies = {
+            "a": interface2,
+        }
 
         def provider2(interface, injector):
             pass
 
-        injector = app.make_injector({
-            interface1: provider1,
-            interface2: provider1,
-        })
-        specialized_injector = injector.specialize({
-            interface2: provider2,
-            interface3: provider2,
-        })
+        provider_set = MagicMock()
+        provider_set.providers = set([
+            provider1,
+        ])
+
+        injector = app.make_injector(
+            provider_set,
+        )
+        specialized_injector = injector.specialize(
+            local_providers={
+                interface2: provider2,
+                interface3: provider2,
+            }
+        )
 
         self.assertEqual(
             type(injector),
@@ -92,11 +104,11 @@ class TestAppAndInjector(unittest.TestCase):
         )
         # Our given providers are registered.
         self.assertEqual(
-            injector.providers[interface1],
+            injector.providers[interface1].im_func,
             provider1,
         )
         self.assertEqual(
-            injector.providers[interface2],
+            injector.providers[interface2].im_func,
             provider1,
         )
         # Injector registers a provider for itself.
@@ -119,7 +131,7 @@ class TestAppAndInjector(unittest.TestCase):
             app,
         )
         self.assertEqual(
-            specialized_injector.providers[interface1],
+            specialized_injector.providers[interface1].im_func,
             provider1,
         )
         self.assertEqual(
@@ -155,13 +167,15 @@ class TestAppAndInjector(unittest.TestCase):
         def interface1_provider(iface, inj):
             return "interface1"
 
-        injector = app.make_injector({
-            # provider for a specific interface instance
-            interface1: interface1_provider,
-            # provider for a whole type of interface, which is used
-            # to support cases like automatic RPC proxy generation, etc.
-            interface_type: lambda iface: "type %s" % iface[0]
-        })
+        injector = app.make_injector(
+            local_providers={
+                # provider for a specific interface instance
+                interface1: interface1_provider,
+                # provider for a whole type of interface, which is used
+                # to support cases like automatic RPC proxy generation, etc.
+                interface_type: lambda iface: "type %s" % iface[0]
+            }
+        )
 
         @app.dependencies(a=interface1, b=interface2)
         def func(a, b):
@@ -193,9 +207,11 @@ class TestAppAndInjector(unittest.TestCase):
         def func(a, b):
             return (a, b)
 
-        injector1 = app.make_injector({
-            interface1: lambda iface: "hi",
-        })
+        injector1 = app.make_injector(
+            local_providers={
+                interface1: lambda iface: "hi",
+            },
+        )
         partial_bound_func = injector1.bind(func)
 
         self.assertEqual(
@@ -203,9 +219,11 @@ class TestAppAndInjector(unittest.TestCase):
             ("hi", "world"),
         )
 
-        injector2 = injector1.specialize({
-            interface2: lambda iface: "cheese",
-        })
+        injector2 = injector1.specialize(
+            local_providers={
+                interface2: lambda iface: "cheese",
+            }
+        )
 
         bound_func = injector2.bind(partial_bound_func)
 
@@ -230,9 +248,11 @@ class TestAppAndInjector(unittest.TestCase):
         foo1 = Foo("foo1")
         foo2 = Foo("foo2")
 
-        injector = app.make_injector({
-            interface1: lambda iface: "interface1"
-        })
+        injector = app.make_injector(
+            local_providers={
+                interface1: lambda iface: "interface1"
+            }
+        )
 
         foo1_bar = injector.bind(foo1.bar)
         foo2_bar = injector.bind(foo2.bar)
