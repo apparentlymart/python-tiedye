@@ -180,7 +180,7 @@ class TestAppAndInjector(unittest.TestCase):
     def test_injector_partial_bind(self):
         app = Application()
         interface1 = MagicMock(name="interface1")
-        interface2 = MagicMock(name="interface1")
+        interface2 = MagicMock(name="interface2")
 
         @app.dependencies(a=interface1, b=interface2)
         def func(a, b):
