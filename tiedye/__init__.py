@@ -106,6 +106,26 @@ class Injector(object):
         self.currently_binding = set()
         self.bound_funcs = weakref.WeakKeyDictionary()
 
+    def get(self, interface):
+        """
+        Retrieve the implementation of the given interface.
+
+        If no provider is registered for the given interface, will raise
+        a :py:class:`DependencyError`.
+        """
+        interface_type = type(interface)
+        if interface in self.providers:
+            provider = self.providers[interface]
+        elif interface_type in self.providers:
+            provider = self.providers[interface_type]
+        else:
+            raise DependencyError(
+                "No provider for %r" % interface
+            )
+
+        # Bind the provider so it can request dependencies of its own.
+        return self.call(provider, interface)
+
     def bind(self, func):
         """
         Bind dependencies to a callable.
@@ -156,24 +176,15 @@ class Injector(object):
         kwargs = {}
         unprovided = {}
         for arg_name, interface in deps.iteritems():
-            interface_type = type(interface)
-            if interface in self.providers:
-                provider = self.providers[interface]
-            elif interface_type in self.providers:
-                provider = self.providers[interface_type]
-            else:
+            try:
+                kwargs[arg_name] = self.get(interface)
+            except DependencyError:
                 # Record unprovided interfaces to allow partial injection,
                 # e.g. to allow some interfaces to be injected at application
                 # startup time and then others to be injected on a
                 # per-request basis.
                 unprovided[arg_name] = interface
                 continue
-
-            # Recursively bind the provider too, so it can request
-            # dependencies of its own.
-            provider = self.bind(provider)
-
-            kwargs[arg_name] = provider(interface)
 
         self.currently_binding.remove(lookup_func)
 
@@ -185,6 +196,29 @@ class Injector(object):
             )
         self.bound_funcs[func] = injected
         return injected
+
+    def call(self, func, *args, **kwargs):
+        """
+        Call a callable that may have registered dependencies.
+
+        All of the registered dependencies must be available, or else
+        this will raise a :py:class:`DependencyError`.
+        """
+        bound = self.bind(func)
+        if bound in self.app.dependency_map:
+            if len(self.app.dependency_map[bound]) > 0:
+                raise DependencyError(
+                    "Unresolved dependencies for %r: %s" % (
+                        func,
+                        ", ".join(
+                            (
+                                repr(x) for x in
+                                self.app.dependency_map[bound].iterkeys()
+                            ),
+                        )
+                    ),
+                )
+        return bound(*args, **kwargs)
 
     def specialize(self, *provider_sets, **kwargs):
         """
@@ -301,5 +335,9 @@ class ProviderSet(object):
         return annotate
 
 
-class DependencyCycleError(Exception):
+class DependencyError(Exception):
+    pass
+
+
+class DependencyCycleError(DependencyError):
     pass

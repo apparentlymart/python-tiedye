@@ -198,6 +198,15 @@ class TestAppAndInjector(unittest.TestCase):
             bound_func2 is bound_func,
         )
 
+        self.assertEqual(
+            injector.call(func),
+            ("interface1", "type hi"),
+        )
+        self.assertEqual(
+            injector.get(interface1),
+            "interface1",
+        )
+
     def test_injector_partial_bind(self):
         app = Application()
         interface1 = MagicMock(name="interface1")
@@ -276,4 +285,13 @@ class TestAppAndInjector(unittest.TestCase):
         foo1_bar2 = injector.bind(foo1.bar)
         self.assertTrue(
             foo1_bar2 is not foo2_bar,
+        )
+
+        self.assertEqual(
+            injector.call(foo1.bar),
+            ("foo1", "interface1"),
+        )
+        self.assertEqual(
+            injector.get(interface1),
+            "interface1",
         )
