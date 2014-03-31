@@ -665,7 +665,7 @@ tends to change in response to every other system change, since this encourages
 version control conflicts and thus hampers parallel development.
 
 Until this point we've done pretty well with only the application of a
-design pattern that works within standard Python functionality. Howver, this
+design pattern that works within standard Python functionality. However, this
 dependency-wiring problem is difficult to solve in Python alone, and *this*
 is where ``tiedye`` becomes useful: it provides a simple mechanism to
 declare subsystem dependencies and then a utility to automatically wire
@@ -700,12 +700,8 @@ That's a big bunch of new concepts to understand, but don't worry about them
 too much for the moment as we'll explore each of them by example as we fit
 them into our example application.
 
-The first step is actually, if we're honest, a bit of a step back: we'll
-create a global *application* object and some interface objects that each of
-our subsystems will depend on. This does of course couple the subsystems to
-their containing codebase, but in return for this one deviation from the
-pattern we gain the ability to decentralize dependency declarations, as we'll
-see later.
+The first step is to declare some objects that we'll use to describe
+dependencies in a declarative way:
 
 .. code-block:: python
 
@@ -718,6 +714,7 @@ see later.
    Settings = tiedye.make_interface_enum(
        "MEMCACHE_SERVERS",
        "SIDER_SERVERS",
+       "TEMPLATE_DIR",
    )
 
 Here we've created an application and a few interfaces. Any existing class
@@ -727,80 +724,108 @@ any abstract class in particular, and ``make_interface_enum`` to create
 a set of related interfaces at once. We'll see examples of all of these
 techniques below.
 
-Via a method on the ``app`` object we can now register class dependencies
-using a decorator. Let's use ``TemplateRenderer`` as our first example:
+Separately we define the default set of providers for each of our interfaces,
+using a :py:class:`ProviderSet` subclass:
 
 .. code-block:: python
 
-   @app.dependencies(cache=Cache, compile_template=CompileTemplate)
-   class TemplateRenderer(object):
+   from tiedye import ProviderSet
 
-       def __init__(self, cache, compile_template):
-           self.cache = cache
-           self.compile_template = compile_template
+   class Providers(ProviderSet):
 
-       def render(self, data, template_name):
-           # ...just as before
-
-Before describing what we've just done it's more interesting to note what's
-stayed the same: this is still just a plain old Python class that can be
-instantiated as normal... existing code that works with this class can
-operate completely unchanged.
-
-All we've actually done here is registered a set of dependencies for this
-class inside the ``app`` object. That dependency injection can be understood
-as "pass a ``Cache`` implementation into the ``cache`` argument, and a
-``CompileTemplate`` implementation into the ``compile_template`` argument".
-In other words, we're just telling ``tiedye`` what kind of object is
-expected for each of the initializer's arguments.
-
-Let's also do similarly for ``ArticleRenderer`` and ``UberTemplatesCompiler``:
-
-.. code-block:: python
-
-   # Here we're using the existing TemplateRenderer class as an interface
-   # identifier, since it's the canonical implementation of this interface.
-   # This doesn't prevent us from using instances of other classes as
-   # implementations, however.
-   @app.dependencies(template_renderer=TemplateRenderer)
-   class ArticleRenderer(object):
-
-       def __init__(self, template_renderer):
-           self.template_renderer = template_renderer
-
-       def render_article(self, article_id):
-           # ...just as before
-
-   @app.dependencies(template_dir=TemplateDir)
-   class UberTemplatesCompiler(object):
-
-       def __init__(self, template_dir):
-           self.template_dir = template_dir
-
-       def compile_template(self, template_name):
-           # ...just as before
-
-With all of our dependencies declared we can now use an injector to wire
-all of this up, by passing a provider function for each interface:
-
-.. code-block:: python
-
-   @app.dependencies(servers=Settings.MEMCACHE_SERVERS)
-   def memcache_provider(interface, servers):
-       # assuming we changed the MemcacheCache class to take the
-       # servers as a paramter, rather than accessing settings directly.
-       return MemcacheCache(servers)
-
-   def settings_provider(interface):
-       from uberframework.conf import settings
-       return getattr(settings, interface.name)
-
-   injector = app.make_injector({
-       Cache: memcache_provider,
+       @ProviderSet.provide(Cache, servers=Settings.MEMCACHE_SERVERS)
+       def get_memcache(self, Cache, servers):
+           return MemcacheCache(servers)
 
        # This provider applies to *all* interfaces inside the Settings
        # enum, since the implementation is the same for all of them.
-       Settings: settings_provider,
+       @ProviderSet.provide(Settings)
+       def get_setting(self, setting_interface):
+           from uberframework.conf import settings
+           return getattr(settings, interface.name)
 
-       # etc, etc
-   })
+       @ProviderSet.provide(TemplateDir, template_dir=Settings.TEMPLATE_DIR)
+       def get_template_dir(self, TemplateDir, template_dir):
+           return template_dir
+
+       @ProviderSet.provide(CompileTemplate, template_dir=TemplateDir)
+       def get_compile_template(self, CompileTemplate, template_dir):
+           import os.path
+           import ubertemplates
+
+           def compile_template(template_name):
+               return ubertemplates.compile_template_to_python(
+                   os.path.join(template_dir, template_name + '.tmpl')
+               )
+
+           return compile_template
+
+       @ProviderSet.provide(
+           TemplateRenderer,
+           cache=Cache,
+           compile_template=CompileTemplate,
+       )
+       def get_template_renderer(
+           self, TemplateRenderer, cache, compile_template,
+       ):
+           return TemplateRenderer(
+                cache=cache,
+                compile_template=compile_template,
+           )
+
+       @ProviderSet.provide(
+           ArticleRenderer,
+           template_renderer=TemplateRenderer,
+       )
+       def get_article_renderer(self, ArticleRenderer, template_renderer):
+           return ArticleRenderer(
+               template_renderer=template_renderer,
+           )
+
+:py:class:`ProviderSet` is a utility for easily defining sets of providers.
+The ``@ProviderSet.provide`` decorator function defines which interfaces
+the following method provides (as positional arguments) as well as any
+dependencies the provider needs injected to do its work (as named arguments).
+The dependency arguments must have names that match parameter names in the
+decorated method, into which the resolved implementations will be passed.
+
+With all of our providers declared we can now create an injector to wire
+all of this up:
+
+.. code-block:: python
+
+   injector = app.make_injector(Providers())
+
+   article_renderer = injector.get(ArticleRenderer)
+   print article_renderer.render_article(article_id)
+
+The injector knows how to satisfy the ``ArticleRenderer`` interface because
+of our ``Providers`` object, and it also knows that an article render
+depends on a template renderer, which in turn depends on a cache, and
+makes sure all of these things get instantiated in the correct order to
+get a working instance.
+
+All we've done here is let ``tiedye`` automatically handle the dependencies
+between implementations. We still have one big location to update whenever
+these dependencies change, but we can mitigate that for a larger application
+by splitting the providers across multiple ``ProviderSet``s and passing
+each of them into the injector.
+
+Conclusion
+----------
+
+During this chapter we've gone from a tightly-coupled and difficult-to-test
+application to a manually-wired dependency-injected application and finally
+to an automatically-wired dependency-injected application.
+
+For many simpler applications the manual wiring approach may be completely
+sufficient. Arguably the trivial application used in the example falls
+into this category. However, ``tiedye`` provides a simple utility for
+automatic wiring where developers find that useful, and does so in a way
+that is compatible with the manual wiring approach such that switching does
+not entail a rewrite.
+
+The remainder of this manual describes some more advanced uses of ``tiedye``,
+which are completely optional but may be useful when building larger
+applications or integrations with existing frameworks.
+
