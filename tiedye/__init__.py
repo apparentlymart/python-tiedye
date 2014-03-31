@@ -104,7 +104,16 @@ class Injector(object):
 
         self.providers = providers
         self.currently_binding = set()
-        self.bound_funcs = weakref.WeakKeyDictionary()
+        # This is a weak key dictionary because we potentially create
+        # many transient functions, such as when doing partial binding
+        # or if the caller creates lambda functions in a loop. We'll
+        # only retain the binding wrappers that are stored by a caller.
+        self.bound_funcs = weakref.WeakValueDictionary()
+        # This one is not a weak dictionary because the maximum size of
+        # this dictionary is bounded at the size of the providers
+        # dictionary, and so it can't grow unbounded for the lifetime
+        # of the injector.
+        self.provided = {}
 
     def get(self, interface):
         """
@@ -113,6 +122,11 @@ class Injector(object):
         If no provider is registered for the given interface, will raise
         a :py:class:`DependencyError`.
         """
+        try:
+            return self.provided[interface]
+        except KeyError:
+            pass
+
         interface_type = type(interface)
         if interface in self.providers:
             provider = self.providers[interface]
@@ -124,7 +138,9 @@ class Injector(object):
             )
 
         # Bind the provider so it can request dependencies of its own.
-        return self.call(provider, interface)
+        provided = self.call(provider, interface)
+        self.provided[interface] = provided
+        return provided
 
     def bind(self, func):
         """

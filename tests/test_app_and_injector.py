@@ -295,3 +295,19 @@ class TestAppAndInjector(unittest.TestCase):
             injector.get(interface1),
             "interface1",
         )
+
+    def test_injector_singletons(self):
+        app = Application()
+        interface1 = MagicMock(name="interface1")
+
+        injector = app.make_injector(
+            local_providers={
+                interface1: lambda iface: {}
+            }
+        )
+
+        # Even though we call get twice, we should get exactly the same
+        # instance back both times.
+        self.assertTrue(
+            injector.get(interface1) is injector.get(interface1),
+        )
